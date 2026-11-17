@@ -571,27 +571,421 @@ def load_5g_nidd_csv(
     return x, y
 
 
+_CIC_FEATURE_COLS: tuple[str, ...] = (
+    "Dst Port",
+    "Protocol",
+    "Flow Duration",
+    "Total Fwd Packet",
+    "Total Bwd packets",
+    "Total Length of Fwd Packet",
+    "Total Length of Bwd Packet",
+    "Fwd Packet Length Max",
+    "Fwd Packet Length Min",
+    "Fwd Packet Length Mean",
+    "Fwd Packet Length Std",
+    "Bwd Packet Length Max",
+    "Bwd Packet Length Min",
+    "Bwd Packet Length Mean",
+    "Bwd Packet Length Std",
+    "Flow Bytes/s",
+    "Flow Packets/s",
+    "Flow IAT Mean",
+    "Flow IAT Std",
+    "Flow IAT Max",
+    "Flow IAT Min",
+    "Fwd IAT Total",
+    "Fwd IAT Mean",
+    "Fwd IAT Std",
+    "Fwd IAT Max",
+    "Fwd IAT Min",
+    "Bwd IAT Total",
+    "Bwd IAT Mean",
+    "Bwd IAT Std",
+    "Bwd IAT Max",
+    "Bwd IAT Min",
+    "Fwd PSH Flags",
+    "Bwd PSH Flags",
+    "Fwd URG Flags",
+    "Bwd URG Flags",
+    "Fwd Header Length",
+    "Bwd Header Length",
+    "Fwd Packets/s",
+    "Bwd Packets/s",
+    "Packet Length Min",
+    "Packet Length Max",
+    "Packet Length Mean",
+    "Packet Length Std",
+    "Packet Length Variance",
+    "FIN Flag Count",
+    "SYN Flag Count",
+    "RST Flag Count",
+    "PSH Flag Count",
+    "ACK Flag Count",
+    "URG Flag Count",
+    "CWR Flag Count",
+    "ECE Flag Count",
+    "Average Packet Size",
+    "Fwd Segment Size Avg",
+    "Bwd Segment Size Avg",
+    "FWD Init Win Bytes",
+    "Bwd Init Win Bytes",
+    "Fwd Act Data Pkts",
+    "Fwd Seg Size Min",
+    "Active Mean",
+    "Active Std",
+    "Active Max",
+    "Active Min",
+    "Idle Mean",
+    "Idle Std",
+    "Idle Max",
+    "Idle Min",
+)
+
+
+def _map_cicflowmeter_df_to_features(df: object) -> np.ndarray:
+    """Map a CICFlowMeter-schema DataFrame (IDS2018-Improved / TII-SSRC-23) to FEATURE_NAMES."""
+    import pandas as pd
+
+    assert isinstance(df, pd.DataFrame)
+    n = len(df)
+    x = np.zeros((n, NUM_FEATURES), dtype=np.float32)
+    idx_map = {name: i for i, name in enumerate(FEATURE_NAMES)}
+
+    def _num(col: str, clip_zero: bool = True) -> np.ndarray:
+        if col not in df.columns:
+            return np.zeros(n, dtype=np.float64)
+        arr = pd.to_numeric(df[col], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        return np.maximum(arr, 0.0) if clip_zero else arr
+
+    proto = _num("Protocol").astype(np.int64)
+    is_tcp = proto == 6
+    is_udp = proto == 17
+    is_icmp = (proto == 1) | (proto == 58)
+    x[:, idx_map["proto_tcp"]] = is_tcp.astype(np.float32)
+    x[:, idx_map["proto_udp"]] = is_udp.astype(np.float32)
+    x[:, idx_map["proto_icmp"]] = is_icmp.astype(np.float32)
+    x[:, idx_map["proto_other"]] = (~(is_tcp | is_udp | is_icmp)).astype(np.float32)
+
+    dport = _num("Dst Port").astype(np.int64)
+    x[:, idx_map["dst_port_well_known"]] = ((dport >= 0) & (dport <= 1023)).astype(np.float32)
+    x[:, idx_map["dst_port_registered"]] = ((dport >= 1024) & (dport <= 49151)).astype(np.float32)
+    x[:, idx_map["dst_port_dynamic"]] = (dport >= 49152).astype(np.float32)
+    x[:, idx_map["dst_port_http"]] = np.isin(dport, [80, 8080, 8000]).astype(np.float32)
+    x[:, idx_map["dst_port_https"]] = np.isin(dport, [443, 8443]).astype(np.float32)
+    x[:, idx_map["dst_port_dns"]] = (dport == 53).astype(np.float32)
+    x[:, idx_map["dst_port_ssh"]] = (dport == 22).astype(np.float32)
+    x[:, idx_map["dst_port_ftp"]] = np.isin(dport, [20, 21]).astype(np.float32)
+    x[:, idx_map["dst_port_rdp"]] = (dport == 3389).astype(np.float32)
+    x[:, idx_map["dst_port_smb"]] = (dport == 445).astype(np.float32)
+
+    dur_us = _num("Flow Duration")
+    n_fwd = _num("Total Fwd Packet")
+    n_bwd = _num("Total Bwd packets")
+    tot_pkts = n_fwd + n_bwd
+
+    fwd_payload = _num("Total Length of Fwd Packet")
+    bwd_payload = _num("Total Length of Bwd Packet")
+    fwd_hdr = _num("Fwd Header Length")
+    bwd_hdr = _num("Bwd Header Length")
+    # Match extractor.py: ip_len includes IP header (20B) + L4 header + payload
+    total_fwd_bytes = fwd_payload + fwd_hdr + (20.0 * n_fwd)
+    total_bwd_bytes = bwd_payload + bwd_hdr + (20.0 * n_bwd)
+    total_bytes = total_fwd_bytes + total_bwd_bytes
+
+    valid_rate = (dur_us >= 100.0) & (tot_pkts > 1)
+    dur_sec = np.where(valid_rate, dur_us / 1_000_000.0, 1.0)
+
+    x[:, idx_map["flow_duration_us"]] = dur_us.astype(np.float32)
+    x[:, idx_map["flow_bytes_per_s"]] = np.where(valid_rate, total_bytes / dur_sec, 0.0).astype(np.float32)
+    x[:, idx_map["flow_pkts_per_s"]] = np.where(valid_rate, tot_pkts / dur_sec, 0.0).astype(np.float32)
+    x[:, idx_map["fwd_pkts_per_s"]] = np.where(valid_rate, n_fwd / dur_sec, 0.0).astype(np.float32)
+    x[:, idx_map["bwd_pkts_per_s"]] = np.where(valid_rate, n_bwd / dur_sec, 0.0).astype(np.float32)
+
+    x[:, idx_map["total_fwd_pkts"]] = n_fwd.astype(np.float32)
+    x[:, idx_map["total_bwd_pkts"]] = n_bwd.astype(np.float32)
+    x[:, idx_map["total_fwd_bytes"]] = total_fwd_bytes.astype(np.float32)
+    x[:, idx_map["total_bwd_bytes"]] = total_bwd_bytes.astype(np.float32)
+    x[:, idx_map["total_fwd_payload_bytes"]] = fwd_payload.astype(np.float32)
+    x[:, idx_map["total_bwd_payload_bytes"]] = bwd_payload.astype(np.float32)
+    x[:, idx_map["down_up_ratio"]] = np.where(n_fwd > 0, n_bwd / np.maximum(n_fwd, 1.0), 0.0).astype(np.float32)
+    x[:, idx_map["bwd_fwd_bytes_ratio"]] = np.where(
+        total_fwd_bytes > 0.0, total_bwd_bytes / np.maximum(total_fwd_bytes, 1.0), 0.0
+    ).astype(np.float32)
+
+    direct_map = {
+        "fwd_pkt_len_max": "Fwd Packet Length Max",
+        "fwd_pkt_len_min": "Fwd Packet Length Min",
+        "fwd_pkt_len_mean": "Fwd Packet Length Mean",
+        "fwd_pkt_len_std": "Fwd Packet Length Std",
+        "bwd_pkt_len_max": "Bwd Packet Length Max",
+        "bwd_pkt_len_min": "Bwd Packet Length Min",
+        "bwd_pkt_len_mean": "Bwd Packet Length Mean",
+        "bwd_pkt_len_std": "Bwd Packet Length Std",
+        "pkt_len_min": "Packet Length Min",
+        "pkt_len_max": "Packet Length Max",
+        "pkt_len_mean": "Packet Length Mean",
+        "pkt_len_std": "Packet Length Std",
+        "pkt_len_var": "Packet Length Variance",
+        "avg_pkt_size": "Average Packet Size",
+        "avg_fwd_seg_size": "Fwd Segment Size Avg",
+        "avg_bwd_seg_size": "Bwd Segment Size Avg",
+        "flow_iat_mean": "Flow IAT Mean",
+        "flow_iat_std": "Flow IAT Std",
+        "flow_iat_max": "Flow IAT Max",
+        "flow_iat_min": "Flow IAT Min",
+        "fwd_iat_total": "Fwd IAT Total",
+        "fwd_iat_mean": "Fwd IAT Mean",
+        "fwd_iat_std": "Fwd IAT Std",
+        "fwd_iat_max": "Fwd IAT Max",
+        "fwd_iat_min": "Fwd IAT Min",
+        "bwd_iat_total": "Bwd IAT Total",
+        "bwd_iat_mean": "Bwd IAT Mean",
+        "bwd_iat_std": "Bwd IAT Std",
+        "bwd_iat_max": "Bwd IAT Max",
+        "bwd_iat_min": "Bwd IAT Min",
+        "fwd_header_len": "Fwd Header Length",
+        "bwd_header_len": "Bwd Header Length",
+        "fwd_min_seg_size": "Fwd Seg Size Min",
+        "fwd_act_data_pkts": "Fwd Act Data Pkts",
+        "init_win_bytes_fwd": "FWD Init Win Bytes",
+        "init_win_bytes_bwd": "Bwd Init Win Bytes",
+        "active_mean": "Active Mean",
+        "active_std": "Active Std",
+        "active_max": "Active Max",
+        "active_min": "Active Min",
+        "idle_mean": "Idle Mean",
+        "idle_std": "Idle Std",
+        "idle_max": "Idle Max",
+        "idle_min": "Idle Min",
+    }
+    for feat_name, csv_col in direct_map.items():
+        x[:, idx_map[feat_name]] = _num(csv_col).astype(np.float32)
+
+    # Match extractor.py: binary 0/1 presence for all TCP flags
+    flag_map = {
+        "fin_flag_cnt": "FIN Flag Count",
+        "syn_flag_cnt": "SYN Flag Count",
+        "rst_flag_cnt": "RST Flag Count",
+        "psh_flag_cnt": "PSH Flag Count",
+        "ack_flag_cnt": "ACK Flag Count",
+        "urg_flag_cnt": "URG Flag Count",
+        "cwr_flag_cnt": "CWR Flag Count",
+        "ece_flag_cnt": "ECE Flag Count",
+        "fwd_psh_flags": "Fwd PSH Flags",
+        "bwd_psh_flags": "Bwd PSH Flags",
+        "fwd_urg_flags": "Fwd URG Flags",
+        "bwd_urg_flags": "Bwd URG Flags",
+    }
+    for feat_name, csv_col in flag_map.items():
+        x[:, idx_map[feat_name]] = (_num(csv_col) > 0.0).astype(np.float32)
+
+    return np.nan_to_num(x, nan=0.0, posinf=1e9, neginf=0.0)
+
+
+def find_cic_improved_csvs(data_dir: Path) -> list[Path]:
+    """Locate CSE-CIC-IDS2018-Improved CSV files inside data_dir."""
+    if not data_dir.exists():
+        return []
+    import pandas as pd
+
+    found: list[Path] = []
+    for p in sorted(data_dir.rglob("*.csv")):
+        if "cic" not in str(p).lower():
+            continue
+        try:
+            cols = set(pd.read_csv(p, nrows=0).columns)
+        except Exception:
+            continue
+        if "Flow Duration" in cols and "Attempted Category" in cols:
+            found.append(p)
+    return found
+
+
+def find_tii_ssrc_csv(data_dir: Path) -> Path | None:
+    """Locate TII-SSRC-23 data.csv inside data_dir."""
+    if not data_dir.exists():
+        return None
+    import pandas as pd
+
+    for p in sorted(data_dir.rglob("*.csv")):
+        if "tii-ssrc" not in str(p).lower():
+            continue
+        try:
+            cols = set(pd.read_csv(p, nrows=0).columns)
+        except Exception:
+            continue
+        if "Flow Duration" in cols and "Traffic Type" in cols:
+            return p
+    return None
+
+
+def _map_cic_improved_label(label: str) -> int | None:
+    s = label.strip().lower()
+    if s == "benign":
+        return 0
+    if "dos" in s or "ddos" in s:
+        return 1
+    if "portscan" in s or "scan" in s:
+        return 2
+    if "bruteforce" in s or "brute force" in s or "web attack" in s or "infiltration" in s:
+        return 3
+    if "botnet" in s:
+        return 5
+    return None
+
+
+def load_cic_improved_csvs(
+    csv_paths: list[Path],
+    max_benign_per_file: int = 100_000,
+    max_attack_per_label_per_file: int = 60_000,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stream-load CSE-CIC-IDS2018-Improved CSVs with stratified per-file sampling."""
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    use_cols = list(_CIC_FEATURE_COLS) + ["Label"]
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+
+    for csv_path in csv_paths:
+        # First pass is fast if we sample per chunk proportionally using reservoir-like caps
+        per_label_chunks: dict[str, list[pd.DataFrame]] = {}
+        for chunk in pd.read_csv(csv_path, usecols=use_cols, chunksize=400_000, low_memory=False):
+            chunk = chunk.dropna(subset=["Label"])
+            labels_str = chunk["Label"].astype(str)
+            for lbl, grp in chunk.groupby(labels_str, sort=False):
+                cls_id = _map_cic_improved_label(str(lbl))
+                if cls_id is None:
+                    continue
+                cap = max_benign_per_file if cls_id == 0 else max_attack_per_label_per_file
+                # Keep at most ~cap rows across chunks by probabilistic thinning per chunk
+                # (for rare labels with <5k rows in a chunk, keep 100%)
+                if len(grp) > 5_000 and cap < 500_000:
+                    keep_prob = min(1.0, (cap * 1.35) / max(len(grp) * 10, 1))
+                    if len(grp) > cap:
+                        grp = grp.sample(n=min(len(grp), max(2_000, int(len(grp) * keep_prob) + 2_000)), random_state=int(rng.integers(0, 1_000_000)))
+                per_label_chunks.setdefault(str(lbl), []).append(grp)
+
+        file_dfs: list[pd.DataFrame] = []
+        file_ys: list[np.ndarray] = []
+        for lbl, grp_list in per_label_chunks.items():
+            cls_id = _map_cic_improved_label(lbl)
+            if cls_id is None:
+                continue
+            combined = pd.concat(grp_list, ignore_index=True)
+            cap = max_benign_per_file if cls_id == 0 else max_attack_per_label_per_file
+            if len(combined) > cap:
+                combined = combined.sample(n=cap, random_state=seed)
+            file_dfs.append(combined)
+            file_ys.append(np.full(len(combined), cls_id, dtype=np.int64))
+
+        if file_dfs:
+            df_file = pd.concat(file_dfs, ignore_index=True)
+            xs.append(_map_cicflowmeter_df_to_features(df_file))
+            ys.append(np.concatenate(file_ys))
+
+    if not xs:
+        return np.zeros((0, NUM_FEATURES), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+    return np.vstack(xs), np.concatenate(ys)
+
+
+def load_tii_ssrc_23(
+    csv_path: Path,
+    max_dos: int = 160_000,
+    max_recon: int = 120_000,
+    max_mirai: int = 95_000,
+    max_bruteforce: int = 50_000,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stream-load TII-SSRC-23 data.csv with balanced per-Traffic-Type sampling."""
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    use_cols = list(_CIC_FEATURE_COLS) + ["Label", "Traffic Type"]
+    buckets: dict[int, list[pd.DataFrame]] = {0: [], 1: [], 2: [], 3: [], 5: []}
+    caps = {0: 100_000, 1: max_dos, 2: max_recon, 3: max_bruteforce, 5: max_mirai}
+
+    for chunk in pd.read_csv(csv_path, usecols=use_cols, chunksize=400_000, low_memory=False):
+        lbl = chunk["Label"].astype(str).str.strip().str.lower()
+        ttype = chunk["Traffic Type"].astype(str).str.strip().str.lower()
+
+        cls_arr = np.full(len(chunk), -1, dtype=np.int64)
+        cls_arr[lbl == "benign"] = 0
+        cls_arr[ttype == "dos"] = 1
+        cls_arr[ttype == "information gathering"] = 2
+        cls_arr[ttype == "bruteforce"] = 3
+        cls_arr[ttype == "mirai"] = 5
+
+        for cls_id, cap in caps.items():
+            mask = cls_arr == cls_id
+            if not np.any(mask):
+                continue
+            sub = chunk.loc[mask]
+            # Keep all rare rows; thin huge chunks (~22 chunks total in 8.66M rows)
+            if len(sub) > 10_000:
+                target_per_chunk = max(3_000, int(cap / 15))
+                if len(sub) > target_per_chunk:
+                    sub = sub.sample(n=target_per_chunk, random_state=int(rng.integers(0, 1_000_000)))
+            buckets[cls_id].append(sub)
+
+    dfs: list[pd.DataFrame] = []
+    ys: list[np.ndarray] = []
+    for cls_id, grp_list in buckets.items():
+        if not grp_list:
+            continue
+        combined = pd.concat(grp_list, ignore_index=True)
+        cap = caps[cls_id]
+        if len(combined) > cap:
+            combined = combined.sample(n=cap, random_state=seed)
+        dfs.append(combined)
+        ys.append(np.full(len(combined), cls_id, dtype=np.int64))
+
+    if not dfs:
+        return np.zeros((0, NUM_FEATURES), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+    df_all = pd.concat(dfs, ignore_index=True)
+    return _map_cicflowmeter_df_to_features(df_all), np.concatenate(ys)
+
+
 def load_combined_real_datasets(
     data_dir: Path,
     seed: int = 42,
+    include_legacy: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, tuple[str, ...], list[str]] | None:
     """Load and merge all recognized real datasets in data_dir, shuffled together."""
     xs: list[np.ndarray] = []
     ys: list[np.ndarray] = []
     sources: list[str] = []
 
-    nf_csv = find_nf_unsw_csv(data_dir)
-    if nf_csv is not None:
-        x_nf, y_nf = load_nf_unsw_nb15_v3(nf_csv, seed=seed)
-        xs.append(x_nf)
-        ys.append(y_nf)
-        sources.append(f"NF-UNSW-NB15-v3 ({len(y_nf):,})")
+    cic_csvs = find_cic_improved_csvs(data_dir)
+    if cic_csvs:
+        x_cic, y_cic = load_cic_improved_csvs(cic_csvs, seed=seed)
+        if len(y_cic) > 0:
+            xs.append(x_cic)
+            ys.append(y_cic)
+            sources.append(f"CSE-CIC-IDS2018-Improved ({len(y_cic):,})")
 
-    for nidd_csv in find_5g_nidd_csvs(data_dir):
-        x_nidd, y_nidd = load_5g_nidd_csv(nidd_csv, seed=seed)
-        xs.append(x_nidd)
-        ys.append(y_nidd)
-        sources.append(f"5G-NIDD ({len(y_nidd):,})")
+    tii_csv = find_tii_ssrc_csv(data_dir)
+    if tii_csv is not None:
+        x_tii, y_tii = load_tii_ssrc_23(tii_csv, seed=seed)
+        if len(y_tii) > 0:
+            xs.append(x_tii)
+            ys.append(y_tii)
+            sources.append(f"TII-SSRC-23 ({len(y_tii):,})")
+
+    if include_legacy or not xs:
+        nf_csv = find_nf_unsw_csv(data_dir)
+        if nf_csv is not None:
+            x_nf, y_nf = load_nf_unsw_nb15_v3(nf_csv, seed=seed)
+            xs.append(x_nf)
+            ys.append(y_nf)
+            sources.append(f"NF-UNSW-NB15-v3 ({len(y_nf):,})")
+
+        for nidd_csv in find_5g_nidd_csvs(data_dir):
+            x_nidd, y_nidd = load_5g_nidd_csv(nidd_csv, seed=seed)
+            xs.append(x_nidd)
+            ys.append(y_nidd)
+            sources.append(f"5G-NIDD ({len(y_nidd):,})")
 
     if not xs:
         return None
@@ -604,7 +998,14 @@ def load_combined_real_datasets(
 
     x_all = np.vstack(xs).astype(np.float32, copy=False)
     x_all[:, ~common_mask] = 0.0
-    y_all = np.concatenate(ys).astype(np.int64, copy=False)
+    y_raw = np.concatenate(ys).astype(np.int64, copy=False)
+
+    # Compact away any unused classes while keeping Benign at index 0
+    present_ids = sorted(set(int(v) for v in np.unique(y_raw)))
+    id_remap = {old_id: new_id for new_id, old_id in enumerate(present_ids)}
+    y_all = np.vectorize(id_remap.get, otypes=[np.int64])(y_raw)
+    active_class_names = tuple(UNIFIED_CLASSES[old_id] for old_id in present_ids)
+
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(y_all))
-    return x_all[perm], y_all[perm], UNIFIED_CLASSES, sources
+    return x_all[perm], y_all[perm], active_class_names, sources

@@ -1,9 +1,9 @@
 {
   "version": "0.1.0",
-  "dataset_source": "NF-UNSW-NB15-v3 (307,693) + 5G-NIDD (416,001)",
-  "trained_at_utc": "2026-11-17T00:17:09.527868+00:00",
+  "dataset_source": "CSE-CIC-IDS2018-Improved (634,025) + TII-SSRC-23 (202,967)",
+  "trained_at_utc": "2026-11-17T18:42:18.888488+00:00",
   "num_features": 85,
-  "active_features": 38,
+  "active_features": 80,
   "feature_names": [
     "proto_tcp",
     "proto_udp",
@@ -96,15 +96,14 @@
     "DDoS/DoS",
     "PortScan/Recon",
     "Exploits",
-    "Fuzzers/Generic",
     "Malware/Other"
   ],
   "metrics": {
-    "macro_f1": 0.717,
-    "weighted_f1": 0.7985,
-    "macro_pr_auc": 0.7953,
-    "false_positive_rate": 0.0001,
-    "onnx_max_diff": 5.7220458984375e-06
+    "macro_f1": 0.9985,
+    "weighted_f1": 0.9994,
+    "macro_pr_auc": 0.9998,
+    "false_positive_rate": 0.0003,
+    "onnx_max_diff": 6.67572021484375e-06
   },
   "thresholds": {
     "suspicious": 0.45,
