@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nids-traffic-analyzer"
+version = "0.1.0"
+description = "Modern bidirectional flow-based NIDS with Tabular ResNet, ONNX Runtime, and PySide6 GUI"
+readme = "PROJECT_HANDOFF.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26.0",
+    "pandas>=2.1.0",
+    "scikit-learn>=1.4.0",
+    "joblib>=1.3.0",
+    "pyyaml>=6.0.1",
+    "dpkt>=1.9.8",
+    "scapy>=2.5.0",
+    "torch>=2.2.0",
+    "onnx>=1.15.0",
+    "onnxscript>=0.1.0",
+    "onnxruntime>=1.17.0",
+    "PySide6>=6.6.0",
+    "pyqtgraph>=0.13.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
