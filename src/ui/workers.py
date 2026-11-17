@@ -11,10 +11,22 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
 from src.capture.flow_table import FlowRecord, FlowTable
-from src.capture.packet_parser import DLT_EN10MB, DLT_NULL, iter_pcap_packets, parse_raw_packet
+from src.capture.packet_parser import DLT_EN10MB, DLT_NULL, ParsedPacket, iter_pcap_packets, parse_raw_packet
 from src.config import AppConfig
 from src.ml.dataset import _simulate_flow
 from src.ml.inference import FlowInferenceEngine, FlowPrediction
+
+
+def _is_local_noise_packet(pkt: ParsedPacket) -> bool:
+    """Filter loopback IPC and local discovery multicast chatter in live capture."""
+    src, dst = pkt.src_ip, pkt.dst_ip
+    if src.startswith("127.") or dst.startswith("127.") or src == "::1" or dst == "::1":
+        return True
+    if dst.startswith("224.0.0.") or dst in ("239.255.255.250", "255.255.255.255"):
+        return True
+    if dst.startswith("ff02::") or dst.startswith("ff12::"):
+        return True
+    return False
 
 
 def list_network_interfaces() -> list[tuple[str, str]]:
@@ -211,7 +223,7 @@ class CaptureInferenceWorker(QObject):
                 try:
                     raw_bytes, ts, dlt = pkt_queue.get(timeout=0.05)
                     parsed = parse_raw_packet(raw_bytes, ts, datalink=dlt)
-                    if parsed is not None:
+                    if parsed is not None and not _is_local_noise_packet(parsed):
                         pkt_count += 1
                         completed = table.process_packet(parsed)
                         if completed:

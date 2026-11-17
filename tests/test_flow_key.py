@@ -71,11 +71,22 @@ def test_flow_table_aggregates_fwd_and_bwd_packets() -> None:
 
 
 def test_flow_table_closes_on_two_fins() -> None:
-    table = FlowTable()
+    table = FlowTable(closing_grace_sec=2.0)
     p_fin1 = ParsedPacket(1.0, "1.1.1.1", "2.2.2.2", 1234, 80, 6, 52, 0, 32, TH_FIN | TH_ACK, 1024, 64)
     p_fin2 = ParsedPacket(1.01, "2.2.2.2", "1.1.1.1", 80, 1234, 6, 52, 0, 32, TH_FIN | TH_ACK, 1024, 64)
+    p_ack_tail = ParsedPacket(1.02, "1.1.1.1", "2.2.2.2", 1234, 80, 6, 52, 0, 32, TH_ACK, 1024, 64)
 
     assert table.process_packet(p_fin1) == []
-    completed = table.process_packet(p_fin2)
+    assert table.process_packet(p_fin2) == []
+    assert table.process_packet(p_ack_tail) == []
+    assert table.active_count == 1
+
+    # Before grace period expires, flow remains open to absorb teardown packets
+    assert table.flush_expired(2.5) == []
+    assert table.active_count == 1
+
+    # After closing grace period expires, the complete 3-packet flow is emitted
+    completed = table.flush_expired(3.1)
     assert len(completed) == 1
+    assert len(completed[0].all_lengths) == 3
     assert table.active_count == 0

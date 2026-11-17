@@ -157,10 +157,11 @@ class FlowTable:
 
         flow = self._active.get(key)
         if flow is not None:
+            is_new_syn = bool((pkt.tcp_flags & TH_SYN) and not (pkt.tcp_flags & TH_ACK))
             if (
                 pkt.timestamp - flow.last_ts >= self.idle_timeout_sec
                 or pkt.timestamp - flow.start_ts >= self.active_timeout_sec
-                or (flow.closing and pkt.timestamp - flow.last_ts >= self.closing_grace_sec)
+                or (flow.closing and (is_new_syn or pkt.timestamp - flow.last_ts >= self.closing_grace_sec))
             ):
                 completed.append(self._active.pop(key))
                 flow = None
@@ -186,11 +187,10 @@ class FlowTable:
 
         flow.add_packet(pkt)
 
-        # Immediate termination on RST if both sides or >1 packet, or on second FIN
-        if pkt.tcp_flags & TH_RST:
-            completed.append(self._active.pop(key))
-        elif flow.fin_count >= 2 and (pkt.tcp_flags & TH_ACK):
-            completed.append(self._active.pop(key))
+        # Enter closing grace window on RST or bidirectional FIN+ACK so trailing teardown ACKs
+        # are absorbed into the same flow instead of spawning 1-packet zombie flows.
+        if (pkt.tcp_flags & TH_RST) or (flow.fin_count >= 2 and (pkt.tcp_flags & TH_ACK)):
+            flow.closing = True
 
         return completed
 
